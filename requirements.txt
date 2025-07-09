@@ -1,0 +1,7 @@
+Flask
+requests
+urllib3
+Flask-Cors
+gunicorn
+beautifulsoup4
+lxml

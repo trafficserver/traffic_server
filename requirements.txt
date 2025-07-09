@@ -1,0 +1,6 @@
+Flask
+requests
+urllib3
+Flask-Cors
+free-proxy
+gunicorn

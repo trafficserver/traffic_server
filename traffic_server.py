@@ -8,6 +8,7 @@ from flask_cors import CORS
 import requests
 import urllib3
 import json
+import queue # NOVO: Importa a biblioteca de fila, essencial para o pool de workers
 
 # ==============================================================================
 # >> ÁREA DE CONFIGURAÇÃO <<
@@ -15,6 +16,8 @@ import json
 URL_DO_SEU_SITE = "https://gravacaodevinheta.com.br"
 NOME_DO_SEU_SITE = "Gravação de Vinheta"
 GA_API_SECRET = "u2ME7KqVTfu7S6BLosJsyQ"
+# NOVO: Define o número de trabalhadores simultâneos. 50 é um bom número para não sobrecarregar o Render.
+NUM_WORKERS = 50 
 # ==============================================================================
 
 # --- Configurações Iniciais ---
@@ -43,10 +46,8 @@ def load_cities_from_file():
     global city_names, city_to_ip_map
     try:
         with open('cities.json', 'r', encoding='utf-8') as f:
-            # Garante que não haja cidades duplicadas
             city_names = list(set(json.load(f)))
         
-        # Gera o mapa de IPs com base nas cidades carregadas
         city_to_ip_map = {city: f"189.5.{i // 256}.{i % 256}" for i, city in enumerate(city_names)}
         logging.info(f"✅ Carregadas {len(city_names)} cidades do arquivo cities.json.")
         if not city_names:
@@ -74,7 +75,6 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
         return
 
     try:
-        # Seleciona dados aleatórios para a visita
         city = random.choice(city_names)
         simulated_ip = city_to_ip_map.get(city)
         keyword = random.choice(keywords) if keywords else random.choice(default_keywords)
@@ -83,9 +83,8 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
         
         session_cookie = str(uuid.uuid4())
         user_agent = random.choice(user_agents)
-        engagement_time = random.randint(40000, 120000) # 40 a 120 segundos
+        engagement_time = random.randint(40000, 120000)
 
-        # Monta o payload do evento para o GA4
         event_data = {
             "client_id": str(random.randint(10**9, 10**10 - 1)),
             "events": [{
@@ -95,7 +94,7 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
                     "page_title": NOME_DO_SEU_SITE,
                     "engagement_time_msec": str(engagement_time),
                     "session_id": session_cookie,
-                    "ip_override": simulated_ip, # Força a geolocalização nos relatórios
+                    "ip_override": simulated_ip,
                     "user_agent_override": user_agent,
                     "document_referrer": referrer,
                     "city": city,
@@ -107,7 +106,6 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
 
         ga_url = f"https://www.google-analytics.com/mp/collect?measurement_id={analytics_id}&api_secret={GA_API_SECRET}"
         
-        # Envio para o GA é sempre direto para garantir velocidade e entrega
         ga_response = requests.post(ga_url, json=event_data, timeout=20)
         
         if ga_response.status_code in [200, 204]:
@@ -118,32 +116,72 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
     except Exception as e:
         logging.error(f"❌ Erro inesperado durante a geração da visita: {e}")
 
+# ==============================================================================
+# >> ROTA DA API (TOTALMENTE REFEITA) <<
+# ==============================================================================
 @app.route('/api/gerar-trafego', methods=['POST'])
 def gerar_trafego_api():
     try:
         data = request.get_json(force=True)
-        def worker():
+        
+        # A função que cada um dos nossos trabalhadores (threads) irá executar
+        def thread_worker(q, analytics_id, keywords, traffic_type):
+            while not q.empty():
+                try:
+                    # Pega uma tarefa da fila
+                    _ = q.get() 
+                    gerar_visita(analytics_id, keywords, traffic_type)
+                    # Marca a tarefa como concluída
+                    q.task_done()
+                    # Pequeno delay para não sobrecarregar a API do Google
+                    time.sleep(random.uniform(0.1, 0.3))
+                except Exception as e:
+                    logging.error(f"Erro no worker: {e}")
+
+        # A função principal que orquestra o trabalho em background
+        def background_task_orchestrator():
             total_visits = int(data.get("totalVisits", 100))
-            logging.info(f"Iniciando a geração de {total_visits} eventos em background.")
-            threads = []
-            for _ in range(total_visits):
-                thread = threading.Thread(target=gerar_visita, args=(data.get("analyticsId"), data.get("keywords"), data.get("trafficType")))
-                threads.append(thread)
-                thread.start()
-                # Espaçamento mínimo para não sobrecarregar a rede do Render
-                time.sleep(random.uniform(0.05, 0.2)) 
-            for t in threads:
-                t.join()
-            logging.info(f"Geração de {total_visits} eventos concluída.")
+            analytics_id = data.get("analyticsId")
+            keywords = data.get("keywords")
+            traffic_type = data.get("trafficType")
+
+            if not analytics_id or not keywords:
+                logging.error("analyticsId ou keywords faltando no payload.")
+                return
+
+            logging.info(f"Iniciando a geração de {total_visits} eventos com uma equipe de {NUM_WORKERS} workers.")
             
-        threading.Thread(target=worker).start()
+            # 1. Cria a fila de tarefas
+            task_queue = queue.Queue()
+            
+            # 2. Preenche a fila com o número de visitas desejado
+            for _ in range(total_visits):
+                task_queue.put(None) # O item em si não importa, apenas a contagem
+
+            # 3. Cria e inicia a equipe de trabalhadores (threads)
+            threads = []
+            for _ in range(NUM_WORKERS):
+                thread = threading.Thread(target=thread_worker, args=(task_queue, analytics_id, keywords, traffic_type))
+                thread.daemon = True # Permite que o programa principal saia mesmo se as threads estiverem rodando
+                thread.start()
+                threads.append(thread)
+
+            # 4. Espera a fila esvaziar (todas as tarefas serem concluídas)
+            task_queue.join()
+            
+            logging.info(f"✅ Geração de {total_visits} eventos concluída.")
+            
+        # Inicia o orquestrador em uma thread separada para não bloquear a resposta da API
+        threading.Thread(target=background_task_orchestrator).start()
+        
         return jsonify({"message": "Processo de geração de eventos iniciado com sucesso."})
     except Exception as e:
+        logging.error(f"Erro na rota /api/gerar-trafego: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def index():
-    return "Traffic Server v_final_estavel (IP Override) está online."
+    return "Traffic Server v_final_estavel (IP Override & Worker Pool) está online."
 
 # Carrega os dados do arquivo de cidades uma vez quando o servidor Gunicorn inicia.
 if __name__ != '__main__':

@@ -16,8 +16,8 @@ import queue # NOVO: Importa a biblioteca de fila, essencial para o pool de work
 URL_DO_SEU_SITE = "https://gravacaodevinheta.com.br"
 NOME_DO_SEU_SITE = "Gravação de Vinheta"
 GA_API_SECRET = "u2ME7KqVTfu7S6BLosJsyQ"
-# NOVO: Define o número de trabalhadores simultâneos. 100 é um bom número para não sobrecarregar o Render.
-NUM_WORKERS = 100 
+# NOVO: Define o número de trabalhadores simultâneos. 50 é um bom número para não sobrecarregar o Render.
+NUM_WORKERS = 50 
 # ==============================================================================
 
 # --- Configurações Iniciais ---

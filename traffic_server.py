@@ -3,6 +3,7 @@ import random
 import threading
 import time
 import uuid
+import os # NOVO
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
@@ -16,11 +17,13 @@ import queue
 URL_DO_SEU_SITE = "https://gravacaodevinheta.com.br"
 NOME_DO_SEU_SITE = "Gravação de Vinheta"
 GA_API_SECRET = "u2ME7KqVTfu7S6BLosJsyQ"
-NUM_WORKERS = 50  # Número de trabalhadores simultâneos por lote
-# NOVO: Define o tamanho de cada lote de visitas a ser processado por vez.
+NUM_WORKERS = 50
 BATCH_SIZE = 500
-# NOVO: Define o intervalo (em segundos) entre a verificação de lotes.
 TICK_INTERVAL = 60 # 60 segundos = 1 minuto
+
+# NOVO: URL pública do próprio servidor para mantê-lo acordado.
+# Será lida a partir das variáveis de ambiente do Render.
+RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 # ==============================================================================
 
 # --- Configurações Iniciais ---
@@ -29,13 +32,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-# --- Estrutura para Gerenciamento de Trabalhos em Background ---
-# NOVO: Dicionário para armazenar os trabalhos ativos.
+# --- Estrutura de Gerenciamento de Trabalhos ---
 ACTIVE_JOBS = {}
-# NOVO: Lock para garantir que o acesso ao dicionário de jobs seja seguro entre threads.
 JOBS_LOCK = threading.Lock()
 
-# --- Variáveis Globais para os dados carregados ---
+# --- Variáveis Globais (cidades, etc.) ---
 city_names = []
 city_to_ip_map = {}
 default_keywords = ["vinheta", "anuncio", "propaganda", "carro de som", "audio"]
@@ -56,7 +57,6 @@ def load_cities_from_file():
         logging.info(f"✅ Carregadas {len(city_names)} cidades.")
     except Exception as e:
         logging.critical(f"❌ ERRO CRÍTICO ao carregar 'cities.json': {e}")
-        city_names = []
 
 def get_referrer(traffic_type, keyword):
     if traffic_type == "organic": return f"https://www.google.com.br/search?q={keyword.replace(' ', '+')}"
@@ -68,6 +68,9 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
     if not city_names: return
     try:
         city = random.choice(city_names)
+        keyword = random.choice(keywords) if keywords else random.choice(default_keywords)
+        traffic_type_final = fixed_traffic_type if fixed_traffic_type else random.choice(["organic", "social", "backlink", "reference"])
+        
         event_data = {
             "client_id": str(uuid.uuid4()),
             "events": [{
@@ -77,27 +80,26 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None):
                     "engagement_time_msec": str(random.randint(40000, 120000)),
                     "session_id": str(uuid.uuid4()), "ip_override": city_to_ip_map.get(city),
                     "user_agent_override": random.choice(user_agents),
-                    "document_referrer": get_referrer(fixed_traffic_type if fixed_traffic_type else random.choice(["organic", "social", "backlink", "reference"]), random.choice(keywords) if keywords else random.choice(default_keywords)),
-                    "city": city, "region": "BR"
+                    "document_referrer": get_referrer(traffic_type_final, keyword),
+                    "city": city, "region": "BR", "traffic_source": traffic_type_final
                 }
             }]
         }
         ga_url = f"https://www.google-analytics.com/mp/collect?measurement_id={analytics_id}&api_secret={GA_API_SECRET}"
-        requests.post(ga_url, json=event_data, timeout=20, verify=False)
+        ga_response = requests.post(ga_url, json=event_data, timeout=20, verify=False)
+        if ga_response.status_code not in [200, 204]:
+             logging.warning(f"⚠️ Falha ao enviar evento p/ GA ({ga_response.status_code}): {ga_response.text}")
+
     except Exception as e:
         logging.error(f"❌ Erro ao gerar visita: {e}")
 
 # ==============================================================================
-# >> NOVA ARQUITETURA DE PROCESSAMENTO EM LOTES <<
+# >> ARQUITETURA DE PROCESSAMENTO EM LOTES (COM DESPERTADOR) <<
 # ==============================================================================
-
 def run_visit_batch(job_id, analytics_id, keywords, traffic_type, visits_to_run):
-    """Executa um lote específico de visitas usando um pool de workers."""
     logging.info(f"Iniciando lote para Job '{job_id}': gerando {visits_to_run} visitas.")
-    
     task_queue = queue.Queue()
-    for _ in range(visits_to_run):
-        task_queue.put(None)
+    for _ in range(visits_to_run): task_queue.put(None)
 
     def worker():
         while not task_queue.empty():
@@ -105,96 +107,77 @@ def run_visit_batch(job_id, analytics_id, keywords, traffic_type, visits_to_run)
                 task_queue.get()
                 gerar_visita(analytics_id, keywords, traffic_type)
                 task_queue.task_done()
-            except Exception as e:
-                logging.error(f"Erro no worker do lote: {e}")
+            except Exception: pass
     
-    threads = []
-    for _ in range(NUM_WORKERS):
-        thread = threading.Thread(target=worker)
-        thread.daemon = True
-        thread.start()
-        threads.append(thread)
-    
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(NUM_WORKERS)]
+    for t in threads: t.start()
     task_queue.join()
     logging.info(f"Lote para Job '{job_id}' concluído.")
 
 def job_scheduler_tick():
-    """Função que roda a cada X segundos para verificar e processar os jobs."""
+    """Função que roda a cada X segundos para verificar jobs E manter o servidor acordado."""
     while True:
+        # --- Parte 1: Manter o servidor acordado ---
+        # NOVO: Adicionado o "despertador"
+        if RENDER_EXTERNAL_URL:
+            try:
+                # Faz uma requisição a si mesmo para resetar o timer de inatividade do Render
+                requests.get(RENDER_EXTERNAL_URL, timeout=10)
+                logging.info("Ping 'keep-alive' enviado para si mesmo com sucesso.")
+            except Exception as e:
+                logging.warning(f"Falha ao enviar o ping 'keep-alive': {e}")
+        
+        # --- Parte 2: Processar os trabalhos agendados ---
         with JOBS_LOCK:
-            # Itera sobre uma cópia para poder modificar o dicionário original
-            for job_id, job_details in list(ACTIVE_JOBS.items()):
-                if job_details['processed'] < job_details['total']:
-                    
-                    remaining = job_details['total'] - job_details['processed']
-                    visits_for_this_batch = min(remaining, BATCH_SIZE)
-                    
-                    # Atualiza o contador ANTES de iniciar, para não agendar o mesmo lote duas vezes
-                    job_details['processed'] += visits_for_this_batch
-                    
-                    logging.info(f"Agendando novo lote para Job '{job_id}'. Progresso: {job_details['processed']}/{job_details['total']}")
-                    
-                    # Inicia a execução do lote em uma nova thread para não bloquear o scheduler
-                    batch_thread = threading.Thread(target=run_visit_batch, args=(
-                        job_id,
-                        job_details['analytics_id'],
-                        job_details['keywords'],
-                        job_details['traffic_type'],
-                        visits_for_this_batch
-                    ))
-                    batch_thread.start()
-                else:
-                    logging.info(f"✅ Trabalho '{job_id}' concluído! Removendo da fila.")
-                    del ACTIVE_JOBS[job_id]
+            if not ACTIVE_JOBS:
+                logging.info("Nenhum trabalho ativo. Aguardando...")
+            else:
+                for job_id, job_details in list(ACTIVE_JOBS.items()):
+                    if job_details['processed'] < job_details['total']:
+                        remaining = job_details['total'] - job_details['processed']
+                        visits_for_this_batch = min(remaining, BATCH_SIZE)
+                        job_details['processed'] += visits_for_this_batch
+                        
+                        logging.info(f"Agendando novo lote para Job '{job_id}'. Progresso: {job_details['processed']}/{job_details['total']}")
+                        
+                        batch_thread = threading.Thread(target=run_visit_batch, args=(job_id, job_details['analytics_id'], job_details['keywords'], job_details['traffic_type'], visits_for_this_batch))
+                        batch_thread.start()
+                    else:
+                        logging.info(f"✅ Trabalho '{job_id}' concluído! Removendo da fila.")
+                        del ACTIVE_JOBS[job_id]
         
         time.sleep(TICK_INTERVAL)
 
 # ==============================================================================
 # >> ROTAS DA API <<
 # ==============================================================================
-
 @app.route('/api/gerar-trafego', methods=['POST'])
 def gerar_trafego_api():
-    """Esta rota agora apenas agenda o trabalho e retorna imediatamente."""
     try:
         data = request.get_json(force=True)
         total_visits = int(data.get("totalVisits", 100))
         analytics_id = data.get("analyticsId")
         keywords = data.get("keywords")
-        traffic_type = data.get("trafficType")
-
-        if not all([analytics_id, keywords]):
-            return jsonify({"error": "analyticsId e keywords são obrigatórios."}), 400
+        if not all([analytics_id, keywords]): return jsonify({"error": "analyticsId e keywords são obrigatórios."}), 400
 
         job_id = str(uuid.uuid4())
-        
         with JOBS_LOCK:
-            ACTIVE_JOBS[job_id] = {
-                "total": total_visits,
-                "processed": 0,
-                "analytics_id": analytics_id,
-                "keywords": keywords,
-                "traffic_type": traffic_type
-            }
+            ACTIVE_JOBS[job_id] = { "total": total_visits, "processed": 0, "analytics_id": analytics_id, "keywords": keywords, "traffic_type": data.get("trafficType") }
         
         logging.info(f"Novo trabalho agendado com ID '{job_id}' para {total_visits} visitas.")
         return jsonify({"message": f"Trabalho para gerar {total_visits} visitas foi agendado com sucesso.", "job_id": job_id})
-
     except Exception as e:
-        logging.error(f"Erro ao agendar trabalho: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/')
 def index():
-    return "Traffic Server v_lotes (Batch Scheduler) está online."
+    return "Traffic Server v_despertador (Keep-Alive) está online."
 
 # ==============================================================================
 # >> INICIALIZAÇÃO DO SERVIDOR <<
 # ==============================================================================
 if __name__ != '__main__':
     load_cities_from_file()
-    # Inicia a thread do "gerente" (scheduler) quando o servidor inicia.
-    scheduler_thread = threading.Thread(target=job_scheduler_tick)
-    scheduler_thread.daemon = True
+    scheduler_thread = threading.Thread(target=job_scheduler_tick, daemon=True)
     scheduler_thread.start()
-    logging.info("🚀 Servidor iniciado e agendador de lotes está ativo.")
+    logging.info("🚀 Servidor iniciado e agendador com despertador está ativo.")

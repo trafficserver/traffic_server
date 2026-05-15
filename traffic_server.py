@@ -18,7 +18,7 @@ import queue
 # ==============================================================================
 URL_DO_SEU_SITE = "https://gravacaodevinheta.com.br"
 NOME_DO_SEU_SITE = "Gravacao de Vinheta"
-GA_API_SECRET = "u2ME7KqVTfu7S6BLosJsyQ"
+GA_API_SECRET = "CZOlSEv4TPi9WlKxp-tBig"
 NUM_WORKERS = 50
 BATCH_SIZE = 500
 TICK_INTERVAL = 60

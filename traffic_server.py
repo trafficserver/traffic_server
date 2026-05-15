@@ -203,10 +203,9 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None, regions=None):
         # Variar o ultimo octeto para dar mais diversidade
         ip_override = f"{base_ip.rsplit('.', 1)[0]}.{random.randint(1, 254)}"
         
-        # ========== MONTAR PAYLOAD GA4 (CORRETO!) ==========
+        # ========== MONTAR PAYLOAD GA4 ==========
         event_data = {
             "client_id": str(uuid.uuid4()),
-            "ip_override": ip_override,  # <<< CORRETO: nivel raiz do payload
             "events": [{
                 "name": "page_view",
                 "params": {
@@ -214,6 +213,7 @@ def gerar_visita(analytics_id, keywords, fixed_traffic_type=None, regions=None):
                     "page_title": NOME_DO_SEU_SITE,
                     "engagement_time_msec": str(random.randint(40000, 120000)),
                     "session_id": str(uuid.uuid4()),
+                    "ip_override": ip_override,
                     "user_agent_override": random.choice(user_agents),
                     "document_referrer": get_referrer(traffic_type_final, keyword),
                     "city": cidade,

@@ -312,6 +312,8 @@ def gerar_trafego_api():
 def index():
     return "Traffic Server v2 - Com correcao de IP por estado (bolinhas azuis)!"
 
+# Inicia o scheduler na carga do modulo (funciona com gunicorn no Render)
+start_scheduler_if_not_running()
+
 if __name__ == '__main__':
-    start_scheduler_if_not_running()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

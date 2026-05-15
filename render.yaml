@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: traffic-server-worker
+    env: python
+    plan: free # Usa o plano gratuito
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn --chdir . traffic_server:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.9.18 # Use uma versão compatível com a free-proxy
